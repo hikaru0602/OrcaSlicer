@@ -5,9 +5,10 @@
 #include "test_helpers.hpp"
 
 #include <cctype>
-#include <cmath>
 #include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace Slic3r;
 using namespace Slic3r::Test;
@@ -110,13 +111,14 @@ TEST_CASE("Unsliced rib tower preview reserves the return filament change", "[Mu
 {
     constexpr double prime_volume = 45.;
     constexpr double layer_height = 0.2;
-    constexpr double infill_gap   = 1.5;
     constexpr double rib_width    = 8.;
+    constexpr double brim_width   = 3.;
 
     DynamicPrintConfig config = multifilament_config(2, {
         { "enable_prime_tower",          true },
         { "prime_volume",                prime_volume },
         { "prime_tower_infill_gap",      "150%" },
+        { "prime_tower_brim_width",      brim_width },
         { "wipe_tower_wall_type",        "rib" },
         { "wipe_tower_rib_width",        rib_width },
         { "wipe_tower_extra_rib_length", 0 },
@@ -125,10 +127,22 @@ TEST_CASE("Unsliced rib tower preview reserves the return filament change", "[Mu
 
     Print print;
     Model model;
-    init_print({ cube(25.6) }, print, model, config);
+    std::vector<TriangleMesh> meshes{ cube(25.6), cube(25.6) };
+    const std::vector<std::vector<ConfigBase::SetDeserializeItem>> object_filaments{
+        { { "extruder", 1 } },
+        { { "extruder", 2 } },
+    };
+    init_print(std::move(meshes), print, model, config, &object_filaments);
 
-    // Two filaments can require two changes on a layer: 0 -> 1 -> 0.
-    const double expected_depth =
-        std::sqrt(2. * prime_volume / layer_height * infill_gap) + rib_width / std::sqrt(2.);
-    CHECK(print.wipe_tower_data(2).depth == Catch::Approx(expected_depth));
+    // Consecutive layers visit 0 -> 1 and then return 1 -> 0. The unsliced
+    // footprint must reserve both changes, not just filaments - 1.
+    const double estimated_depth = print.wipe_tower_data(2).depth;
+
+    print.process();
+    const auto &mesh_data = print.wipe_tower_data().wipe_tower_mesh_data;
+    REQUIRE(mesh_data.has_value());
+    const Vec2crd actual_size = get_extents(mesh_data->bottom).size();
+    const double reserved_size = estimated_depth + 2. * brim_width;
+    CHECK(unscaled<double>(actual_size.x()) <= reserved_size + EPSILON);
+    CHECK(unscaled<double>(actual_size.y()) <= reserved_size + EPSILON);
 }
